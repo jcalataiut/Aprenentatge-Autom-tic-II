@@ -1,0 +1,366 @@
+---
+title: "Practica 2"
+author: "Jose Calatayud Mateu"
+date: "2024-04-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 0.1 Neural network modules
+
+In torch all layers and models ara called neural network modules, or for short, nn_modules.
+
+Deep learning models can be thougth of as functions that operate on tensors but these functions have a special technical feature though: they have a state (weights and parameters) which change during training.
+
+### 0.1.1 Implemented nn_models
+
+torch provides implementations of many  of the most common neural network layers, like convolutional recurrent, pooling and activation layers, as well as common loss function.
+
+```{r}
+# Apply a linear module and define structure
+
+linear <- nn_linear(in_features = 10, out_features = 1)
+linear
+
+x<- torch_randn(3,10); x
+linear(x)
+
+```
+Instances of nn_modules also have methods that are useful; for example, to inspect their parameters or move them a different device.
+
+```{r}
+#List of parameters
+str(linear$parameters)
+
+# Acess to individual parameters
+linear$weight
+linear$bias
+
+# Moves the parameters to the specified device
+linear$to(device="cpu")
+```
+
+
+### 0.1.2 Custom nn_modules
+
+To build custom nn_module one requires 2 functions:
+
+initialize: the initialize method is used to initialize model parameters and has access to he self object that can be used to share states between methods
+
+forward: the forward method describes the transformations that the nn_model is going to perform on input data
+
+```{r}
+# Create a Linear nn_module
+Linear <- nn_module(
+  #Initialize model param
+  initialize = function(in_features, out_features){
+    #Indicates to nn_module that x is a parameter
+    self$w <- nn_parameter(torch_randn(in_features, out_features))
+    self$b <- nn_parameter(torch_zeros(out_features))
+  },
+  
+  #Describe trans to data
+  forward = function(input){
+    # Matrix multiplication
+    torch_mm(input,self$w) + self$b
+  }
+)
+
+# Create an instance of fit
+lin <- Linear(in_features = 10, out_features = 1)
+lin$w
+```
+
+We now have instance of the Linear module that is called lin. We are now able to use this instance to actually perform the linear model computation on a tensor. We use the instance as an R function, but it will actually delegate to the forward method that we defined earlier.
+
+
+```{r}
+x <- torch_randn(3,10)
+lin(x)
+```
+
+
+### 0.1.3 Combining multiple modules
+
+
+nn_modules can also include sub-modules, and this is what allows us to write modules using the same abstraction that we use to write layers.
+
+For example, let's build a multi-layer perceptron module with a ReLu activation
+
+```{r}
+# MLP with ReLu activation
+
+nn_mlp <- nn_module(
+  initialize = function(in_features, hidden_features, out_features){
+    self$fc1 = nn_linear(in_features, hidden_features)
+    self$relu = nn_relu()
+    self$fc2 = nn_linear(hidden_features,out_features)
+  },
+  
+  forward = function(input){
+    input %>% 
+      self$fc1() %>% 
+      self$relu() %>%
+      self$fc2()
+  }
+)
+
+mlp <- nn_mlp(in_features = 10, hidden_features = 5, out_features = 1)
+mlp
+
+```
+```{r}
+# Calling the model
+x<- torch_randn(3,10)
+mlp(x)
+```
+Recordatori: In torch there's no difference between module and models, ie, an nn_module can be as low-level as a ReLu activation, or a much higher-level ResNet model.
+
+### 0.1.4 Sequential modules
+
+When the forward method in the nn_module just calls the submodules in a sequence like in the previous example, one can use nn_sequential container to skip writing the forward method:
+
+```{r}
+mlp <- nn_sequential(
+  nn_linear(10,5), 
+  nn_relu(),
+  nn_linear(5,1)
+)
+
+mlp
+```
+
+### 0.1.6 Example: training a linear model
+
+Let's use everything we learned until now to train a linear model on simulated data. First, let's simulate a data set.
+
+We will generate a matrix with 100 observations of 3 variables, all randomly generated from the standard normal distribution. The response tensor will be generated using the equation: $y=0.5+2x_1 - 3x_2 + x_3 + noise$. We also add a small amount of noise sample from N(0,0.01).
+
+```{r}
+# Generate a matrix with 100 observations of 3 variables
+x<- torch_randn(100,3)
+
+#Equation for output tensor
+y<- 0.5 + 2*x[,1] - 3*x[,2] + x[,3] + torch_randn(100)/10
+
+y <- y[,newaxis]
+y
+```
+
+We now define our model and optimizer:
+
+```{r}
+model <- nn_linear(in_features = 3, out_features = 1)
+model$parameters
+
+# Define optimizer that implements SGD
+opt <- optim_sgd(model$parameters, lr=0.1)
+opt
+```
+Training loop
+
+```{r}
+#Training loop to see whether we can obtain function weights back
+
+for(iter in 1:10){
+  #Refresh the grad attribute of all parameters
+  opt$zero_grad()
+  pred <- model(x)
+  loss <- nnf_mse_loss(y,pred)
+  
+  #calculates the gradient/back propagation
+  loss$backward()
+  
+  #use the optimizer to update model parameters
+  opt$step()
+  cat("Loss at step ", iter, ": ", loss$item(), "\n")
+}
+
+```
+
+NOTA: the idiom of zeroing gradinet is here to stay: values stored in grad fiels accumulate; whenever we're done using them, we need to zero them out before reuse.
+
+we can finally see the final parameter value. Compare them to the theorical values and they should be similar to the values we used to simulate our data.
+
+```{r}
+model$weight
+model$bias
+```
+Save model for inferencing using torch_save
+
+Warning: saveRDS doesn't work correctly for torch models
+
+```{r}
+## Finally save model 
+torch_save(model, "Torch/model.pt")
+```
+
+We can reload the model using torch_load
+
+```{r}
+torch_load("Torch/model.pt")
+```
+## 0.2 Datasets and dataloaders
+
+torch_dataset is the object representing data in torch
+
+### 0.2.1 Custom datasets
+
+A new torch_datset can be created using the dataset function, which requeres the frollowing 3 functinos as arguments:
+
+initilize: takes inputs for dataset initialization
+
+.getitem: takes single integer as input and return an observation of the dataset
+
+.length: retuns total number of observations
+
+```{r}
+#Custom torch_dataset
+mydataset <- dataset(
+  initialize = function(n_rows, n_cols){
+    self$x <- torch_randn(n_rows, n_cols)
+    self$y <- torch_randn(n_rows)
+  },
+  
+  # We subset the previously initialized x and y using index provided
+  .getitem = function(index){
+    list(self$x[index,], self$y[index])
+  },
+  
+  #Number of rows by looking at the initialized tensor x
+  .length = function(){
+    self$x$shape[1]
+  }
+)
+```
+
+
+The dataset function creates a definition of how to initialize and get elements from a dataset and compute length. Initialize dataset and start extracting elements form it:
+
+```{r}
+# Initialize
+ds <- mydataset(n_rows=10, n_cols = 3)
+
+# length
+length(ds)
+
+# Extract first observation
+ds[1]
+
+# or equivalent
+ds$.getitem(1)
+```
+### 0.2.2 Common patterns
+
+The dataset() function allows us to define data loading and pre-processing in a very flexible way. We can decide how to implement the dataset in the way it works best for our problem 
+
+See:
+
+### 0.2.3 Dataloaders
+
+Dataloaders are torch's abstraction used to iterate over datasets in batches, and optionally shuffle and prepare data in parallel.
+
+A dataloader is created by passing a dataset instnace to a dataloader() function:
+
+```{r}
+pacman::p_load(torchvision)
+
+# Taking the validation dataset
+mnist <- mnist_dataset(root = "data-raw/mnist", download = TRUE, train = FALSE) #carrega el data
+
+# Data loader
+
+dl <- dataloader(mnist, batch_size = 32, shuffle = TRUE)
+
+# number of batches wwe can extract from datalkoader
+length(dl)
+```
+PyTorch se utiliza para crear un iterador sobre un conjunto de datos que se puede utilizar para entrenar y probar modelos de aprendizaje profundo. Este iterador maneja tareas como la división de los datos en mini-batches, la mezcla aleatoria de los datos y la carga paralela de los datos utilizando múltiples subprocesos, lo que ayuda a acelerar el entrenamiento de modelos. (dataloader)
+
+length() returns the number of batches we can to extract from the dataloader.
+
+Dataloaders can be iterated on using the coro::loop() function combined with a for loop. The reason wwe need coro:loop() is that batches in dataloadeers are only computed when they are actually used, to avoid large memory usage.
+
+```{r}
+total <- 0 
+coro::loop(for(batch in dl){
+  total <- total + batch$x$shape[1]
+})
+total
+```
+You can think of dataloaders as an object similar to an R list with the importance dofference that the elements are not actually computed yet, and they get computed every timbe you loop trough it
+
+
+## 0.3 Problema: programeu una xarxa de regressió
+
+```{r}
+pacman::p_load(torch)
+
+# input dimesionality (number of input features)
+d_in <- 3
+
+# number of observations in training set
+n<-100
+x<- torch_randn(n, d_in)
+coefs <- c(0.2, -1.3, -0.5)
+y <- x$matmul(coefs)$unsqueeze(2) + torch_randn(n,1)
+
+#dimesionality hidden layer
+d_hidden <- 32
+
+# output dimensionality
+d_out <- 1
+
+#weights connecting input to hidden layer
+w1 <- torch_randn(d_in, d_hidden, requires_grad = TRUE)
+
+#weights connecting hidden layer to output layer
+w2 <- torch_randn(d_hidden, d_out, requires_grad = TRUE)
+b1 <- torch_zeros(1,d_hidden, requires_grad = TRUE)
+b2 <- torch_zeros(1,d_out, requires_grad = TRUE)
+
+learning_rate <- 1e-4
+
+### training loop ----------------------------------------------------
+
+for(t in 1:200){
+  ### ---------- Forward pass ----------------
+  y_pred <- x$mm(w1)$add(b1)$relu()$mm(w2)$add(b2)
+  
+  ### ---------- Compute loss ----------------
+  loss <- nnf_mse_loss(y,y_pred)
+  if(t %% 10 == 0) #modulo
+    cat("Epoch: ", t, "Loss: ", loss$item(), "\n")
+  
+  
+  #compute gradient of loss wrt all tensors with require_grad=TRUE
+  loss$backward()
+  
+  ### ---------- Update weight ----------------
+  # Wrap in with_no_grad() because this is a part we don't 
+  # want to record for automatic gradient computation
+  
+  with_no_grad({
+    w1 <- w1$sub_(learning_rate * w1$grad)
+    w2 <- w2$sub_(learning_rate * w2$grad)
+    b1 <- b1$sub_(learning_rate * b1$grad)
+    b2 <- b2$sub_(learning_rate * b2$grad)
+    
+    # Zero gradients after every pass, as they'd accumulate otherwise
+    w1$grad$zero_()
+    w2$grad$zero_()
+    b1$grad$zero_()
+    b2$grad$zero_()
+  })
+}
+
+
+
+
+
+
+
+```
